@@ -1,0 +1,72 @@
+# github-notify configuration.
+#
+# Copy to config.yaml and edit. Structure lives here; secrets live in .env and
+# are referenced by environment variable name only.
+#
+# config.yaml is gitignored because it carries your chat id and, once you
+# populate them, your org's repo names and labels.
+
+telegram:
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  # Security critical. Messages from any chat not listed here are dropped
+  # silently, and the command listener refuses to start while this is empty.
+  allowed_chat_ids: []
+
+accounts:
+  - name: work
+    enabled: true
+    api_base: https://api.github.com
+    token_env: GH_TOKEN_WORK
+
+    destination:
+      chat_id: null               # your Telegram chat id
+      thread_id: null             # optional forum topic
+
+    reasons:
+      - mention
+      - assign
+      - review_requested
+      - team_mention
+      - author
+      - comment
+      - state_change
+      - manual
+      - security_alert
+      - invitation
+      - ci_activity
+      # `subscribed` deliberately omitted: it fires for every comment on every
+      # watched repo, including threads you never touched.
+
+    subject_types: all            # all | [Issue, PullRequest, ...]
+
+    ci_filter: failures_only      # failures_only | all | off
+    ci_destination:
+      chat_id: null
+      thread_id: null
+
+    repos:
+      allow: []                   # empty = every repo the stream carries
+      block: []
+
+    prefix:
+      strategy: [label, conventional, issue_type, type_default]
+      include_scope: false
+      strip_from_title: true
+      bracket_fallback: false
+      # Populate from your org's real labels, otherwise tier 1 never fires:
+      #   curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+      #     "https://api.github.com/repos/OWNER/REPO/labels?per_page=100" \
+      #     | jq -r '.[].name'
+      # Keys are plain strings, so non-English labels work fine.
+      label_map: {}
+        # enhancement: FEAT
+        # bug: BUG
+        # documentation: DOCS
+
+behaviour:
+  timezone: Asia/Singapore
+  include_prs: true
+  mark_as_read: false             # the bot is read-only by design
+  backfill_max_hours: 12
+  coalesce_window_seconds: 90
+  seen_retention_days: 30

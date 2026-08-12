@@ -1,0 +1,23 @@
+services:
+  github-notify:
+    build: .
+    image: github-notify:local
+    container_name: github-notify
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # §6: do not inherit the host TZ implicitly, state it.
+      TZ: Asia/Singapore
+      GHN_CONFIG: /app/config.yaml
+      GHN_DB_PATH: /data/state.db
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/data
+    # No inbound ports. §11.6: outbound HTTPS only.
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
