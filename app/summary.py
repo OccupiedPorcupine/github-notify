@@ -15,7 +15,11 @@ import re
 # ASCII and full-width terminators. Crucially NOT followed by a required \s —
 # Chinese does not put spaces between words.
 TERMINATORS = ".!?。！？；…"
-_SENTENCE_RE = re.compile(rf"[^{re.escape(TERMINATORS)}]*[{re.escape(TERMINATORS)}]+")
+
+# A bare `.` only ends a sentence when it is not between digits. Without the
+# digit guard, "Postgres 17.6.1" becomes three sentences and renders as
+# "Postgres 17. 6. 1", and every "1." in a numbered list splits too.
+_SENTENCE_RE = re.compile(r".*?(?:(?<!\d)\.(?!\d)|[!?。！？；…])+", re.DOTALL)
 
 MAX_CHARS = 400
 MAX_CHARS_CJK = 200          # 400 CJK chars carries 2-3x the content of 400 ASCII
@@ -34,6 +38,8 @@ _LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _QUOTE_LINE_RE = re.compile(r"^\s*>.*$", re.MULTILINE)
 _MENTION_RE = re.compile(r"(?<![\w/])@[A-Za-z0-9][A-Za-z0-9-]*")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
+# Emphasis markers render as literal asterisks in Telegram HTML mode.
+_EMPHASIS_RE = re.compile(r"(\*\*\*|\*\*|\*|___|__|_)(?=\S)(.+?)(?<=\S)\1", re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t]+")
 _BLANK_RE = re.compile(r"\n{2,}")
@@ -59,6 +65,7 @@ def strip_markdown(text: str | None) -> str:
     text = _LINK_RE.sub(r"\1", text)
     text = _QUOTE_LINE_RE.sub(" ", text)      # quoted reply text
     text = _HEADING_RE.sub("", text)
+    text = _EMPHASIS_RE.sub(r"\2", text)
     text = _INLINE_CODE_RE.sub(r"\1", text)
     text = _HTML_TAG_RE.sub(" ", text)
     text = _MENTION_RE.sub("", text)          # would render as dead text

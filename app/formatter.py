@@ -80,10 +80,9 @@ def _actor_line(note: Notification, enriched: Enriched) -> str:
 
     if enriched.comment_author:
         # A real comment triggered this, so name what they did to it.
-        action = "commented" if note.reason not in ACTION_BY_REASON else action
         return f"{actor} {action}" if action else f"{actor} commented"
     if actor and action:
-        return f"{actor} · {action}"
+        return f"{actor} {action}"
     if action:
         return action
     if actor:
