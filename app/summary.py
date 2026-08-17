@@ -39,7 +39,12 @@ _QUOTE_LINE_RE = re.compile(r"^\s*>.*$", re.MULTILINE)
 _MENTION_RE = re.compile(r"(?<![\w/])@[A-Za-z0-9][A-Za-z0-9-]*")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
 # Emphasis markers render as literal asterisks in Telegram HTML mode.
-_EMPHASIS_RE = re.compile(r"(\*\*\*|\*\*|\*|___|__|_)(?=\S)(.+?)(?<=\S)\1", re.DOTALL)
+#
+# Asterisks only. Underscore emphasis is deliberately left alone: `_x_` is rare
+# in issue bodies, while `list_customer_orders` and `__init__` are everywhere,
+# and any rule that strips the first mangles the second. A stray `_` is a much
+# smaller problem than a corrupted identifier.
+_EMPHASIS_STAR_RE = re.compile(r"(\*\*\*|\*\*|\*)(?=\S)(.+?)(?<=\S)\1", re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t]+")
 _BLANK_RE = re.compile(r"\n{2,}")
@@ -65,7 +70,7 @@ def strip_markdown(text: str | None) -> str:
     text = _LINK_RE.sub(r"\1", text)
     text = _QUOTE_LINE_RE.sub(" ", text)      # quoted reply text
     text = _HEADING_RE.sub("", text)
-    text = _EMPHASIS_RE.sub(r"\2", text)
+    text = _EMPHASIS_STAR_RE.sub(r"\2", text)
     text = _INLINE_CODE_RE.sub(r"\1", text)
     text = _HTML_TAG_RE.sub(" ", text)
     text = _MENTION_RE.sub("", text)          # would render as dead text
