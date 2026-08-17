@@ -47,12 +47,18 @@ async def run(args: argparse.Namespace) -> int:
                 for note in result.notifications
                 if filters.drop_reason(account, config, note) is None
             ]
+            # Count before limiting, or `--limit 4` reports "4 pass the filters"
+            # and looks like 16 notifications were silently dropped.
+            passing = len(candidates)
             if args.limit:
                 candidates = candidates[: args.limit]
 
+            showing = (
+                f", showing {len(candidates)}" if len(candidates) != passing else ""
+            )
             print(
                 f"account {account.name}: {len(result.notifications)} unread, "
-                f"{len(candidates)} pass the filters"
+                f"{passing} pass the filters{showing}"
                 f"{' — SENDING' if args.send else ' (dry run)'}\n"
             )
 
