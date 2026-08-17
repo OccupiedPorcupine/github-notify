@@ -35,6 +35,9 @@ LOCK_PATH = os.environ.get("GHN_LOCK", "/data/github-notify.lock")
 FATAL_RETRY_SECONDS = 900.0
 MAX_BACKOFF_SECONDS = 600.0
 
+# How often to log during a quiet stretch, so silence still proves liveness.
+QUIET_LOG_INTERVAL = timedelta(minutes=15)
+
 
 def acquire_single_instance_lock() -> "object":
     """§9: two instances double-send. Fail fast rather than racing."""
@@ -77,6 +80,7 @@ class AccountWorker:
         self.identity: github.Identity | None = None
         self.backoff = 5.0
         self._alerted_fatal: str | None = None
+        self._last_status_log = utcnow()
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -240,6 +244,17 @@ class AccountWorker:
             self.backoff = 5.0
             self._alerted_fatal = None
             cursor = await self.handle_result(result, cursor)
+
+            # A 304 logs nothing, so a healthy quiet stretch and a wedged poller
+            # look identical in the log. Say something occasionally.
+            if not result.not_modified:
+                self._last_status_log = utcnow()
+            elif utcnow() - self._last_status_log > QUIET_LOG_INTERVAL:
+                log.info(
+                    "polling, nothing new",
+                    extra={"account": self.account.name, "cursor_ts": cursor},
+                )
+                self._last_status_log = utcnow()
             last_modified = result.last_modified
             self.db.update_state(
                 self.account.name,
