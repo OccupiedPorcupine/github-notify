@@ -17,12 +17,13 @@ import sys
 from collections import Counter
 from datetime import timedelta
 
-from . import filters, github
+from . import enrich, filters, formatter, github, telegram
 from .bot import CommandBot
 from .config import Account, Config, ConfigError, load_config
 from .db import Database, iso, parse_iso, utcnow
-from .github import GitHubClient, Notification
+from .github import GitHubClient
 from .logging_setup import setup_logging
+from .telegram import TelegramClient
 
 log = logging.getLogger("main")
 
@@ -61,11 +62,18 @@ def touch_heartbeat() -> None:
 
 
 class AccountWorker:
-    def __init__(self, account: Account, config: Config, db: Database) -> None:
+    def __init__(
+        self,
+        account: Account,
+        config: Config,
+        db: Database,
+        sender: TelegramClient | None = None,
+    ) -> None:
         self.account = account
         self.config = config
         self.db = db
         self.client = GitHubClient(account.api_base, account.token)
+        self.sender = sender
         self.identity: github.Identity | None = None
         self.backoff = 5.0
         self._alerted_fatal: str | None = None
@@ -231,7 +239,7 @@ class AccountWorker:
 
             self.backoff = 5.0
             self._alerted_fatal = None
-            cursor = self.handle_result(result, cursor)
+            cursor = await self.handle_result(result, cursor)
             last_modified = result.last_modified
             self.db.update_state(
                 self.account.name,
@@ -252,12 +260,13 @@ class AccountWorker:
 
             await _sleep_or_stop(float(result.poll_interval), stop)
 
-    def handle_result(self, result: github.PollResult, cursor: str) -> str:
+    async def handle_result(self, result: github.PollResult, cursor: str) -> str:
         if result.not_modified:
             log.debug("304 not modified", extra={"account": self.account.name})
             return cursor
 
-        kept = 0
+        sent = 0
+        failed = 0
         duplicates = 0
         dropped: Counter[str] = Counter()
         newest = parse_iso(cursor)
@@ -281,36 +290,27 @@ class AccountWorker:
                 )
                 continue
 
-            if not self.db.mark_seen(
-                self.account.name, note.thread_id, note.dedupe_key
-            ):
+            # Check, don't claim. The row is only written once the message is
+            # actually delivered, so a send failure retries on the next poll.
+            if self.db.is_seen(self.account.name, note.thread_id, note.dedupe_key):
                 duplicates += 1
                 continue
 
-            kept += 1
-            # Step 1 stops here. Step 3 replaces this with enrich → format → send.
-            log.info(
-                "would_send",
-                extra={
-                    "account": self.account.name,
-                    "thread_id": note.thread_id,
-                    "reason": note.reason,
-                    "subject_type": note.subject_type,
-                    "repo": note.repo_full_name,
-                    "number": note.number,
-                    "title": note.subject_title,
-                    "updated_at": note.updated_at,
-                    "dedupe_key": note.dedupe_key,
-                    "has_comment": note.latest_comment_url is not None,
-                },
-            )
+            outcome = await self.deliver(note)
+            if outcome == "sent":
+                sent += 1
+            elif outcome == "failed":
+                failed += 1
+            else:
+                dropped[outcome] += 1
 
         log.info(
             "poll complete",
             extra={
                 "account": self.account.name,
                 "received": len(result.notifications),
-                "new": kept,
+                "sent": sent,
+                "failed": failed,
                 "duplicate": duplicates,
                 "dropped": dict(dropped),
                 "poll_interval": result.poll_interval,
@@ -319,6 +319,81 @@ class AccountWorker:
 
         # §9 clock skew: the cursor comes from GitHub's timestamps, not ours.
         return iso(newest) if newest else cursor
+
+    async def deliver(self, note: github.Notification) -> str:
+        """Enrich → format → send one notification. Returns an outcome label."""
+        try:
+            enriched = await enrich.enrich(self.client, note)
+        except github.GitHubError as exc:
+            log.warning(
+                "enrichment failed, will retry next poll",
+                extra={"thread_id": note.thread_id, "error": str(exc)},
+            )
+            return "failed"
+
+        viewer = self.identity.login if self.identity else ""
+        if viewer and enrich.is_self_authored(enriched, viewer):
+            # §5: without this you ping yourself for your own comments.
+            self.db.mark_seen(self.account.name, note.thread_id, note.dedupe_key)
+            return "self_authored"
+
+        if note.subject_type == "CheckSuite" and enrich.ci_should_drop(
+            enriched, self.account.ci_filter
+        ):
+            self.db.mark_seen(self.account.name, note.thread_id, note.dedupe_key)
+            return "ci_filtered"
+
+        message, tier = formatter.build_message(
+            self.account, self.config.behaviour, note, enriched
+        )
+
+        destination = self.account.destination
+        if note.subject_type == "CheckSuite" and self.account.ci_destination.chat_id:
+            destination = self.account.ci_destination
+
+        try:
+            message_id = await self.sender.send_message(
+                destination.chat_id, message, thread_id=destination.thread_id
+            )
+        except telegram.TelegramBadRequest as exc:
+            # Malformed HTML for this specific message. Retrying sends the same
+            # bytes and fails identically, so record it and move on.
+            log.error(
+                "telegram rejected the message, skipping it",
+                extra={
+                    "thread_id": note.thread_id,
+                    "error": str(exc),
+                    "title": note.subject_title,
+                },
+            )
+            self.db.mark_seen(self.account.name, note.thread_id, note.dedupe_key)
+            return "failed"
+        except telegram.TelegramError as exc:
+            log.warning(
+                "send failed, will retry next poll",
+                extra={"thread_id": note.thread_id, "error": str(exc)},
+            )
+            return "failed"
+
+        self.db.mark_seen(
+            self.account.name, note.thread_id, note.dedupe_key, tg_msg_id=message_id
+        )
+        log.info(
+            "sent",
+            extra={
+                "account": self.account.name,
+                "thread_id": note.thread_id,
+                "reason": note.reason,
+                "subject_type": note.subject_type,
+                "repo": note.repo_full_name,
+                "number": note.number,
+                "prefix_tier": tier,
+                "chat_id": destination.chat_id,
+                "tg_msg_id": message_id,
+                "degraded": enriched.degraded,
+            },
+        )
+        return "sent"
 
 
 async def _sleep_or_stop(seconds: float, stop: asyncio.Event) -> None:
@@ -333,7 +408,9 @@ async def amain() -> int:
     setup_logging()
 
     try:
-        config = load_config(require_telegram=False)
+        # Sending is live now, so the chat allowlist and destinations are
+        # enforced at startup rather than warned about (§11.1).
+        config = load_config(require_telegram=True)
     except ConfigError as exc:
         log.error("config error", extra={"error": str(exc)})
         return 2
@@ -344,7 +421,7 @@ async def amain() -> int:
     log.info(
         "starting",
         extra={
-            "mode": "log-only (build step 1, no sending)",
+            "mode": "delivering (build step 3)",
             "accounts": [a.name for a in config.accounts],
             "timezone": config.behaviour.timezone,
             "db": db.path,
@@ -356,7 +433,8 @@ async def amain() -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
-    workers = [AccountWorker(a, config, db) for a in config.accounts]
+    sender = TelegramClient(config.telegram.bot_token or "")
+    workers = [AccountWorker(a, config, db, sender) for a in config.accounts]
     command_bot = CommandBot(config, db, workers)
     try:
         await asyncio.gather(
@@ -367,6 +445,7 @@ async def amain() -> int:
         for worker in workers:
             await worker.aclose()
         await command_bot.aclose()
+        await sender.aclose()
         db.close()
         lock.close()
         log.info("stopped")

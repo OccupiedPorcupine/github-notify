@@ -233,6 +233,30 @@ def load_config(path: str | None = None, *, require_telegram: bool = False) -> C
     if len(set(names)) != len(names):
         raise ConfigError(f"duplicate account names: {names}")
 
+    if require_telegram:
+        for account in accounts:
+            if account.destination.chat_id is None:
+                raise ConfigError(
+                    f"account {account.name!r} has no destination.chat_id, so its "
+                    f"notifications have nowhere to go. Run "
+                    f"`python -m app.ping --discover` to find your chat id."
+                )
+            # A typo here would send private work issue content to a stranger,
+            # so the destination must be on the allowlist, not merely valid.
+            if account.destination.chat_id not in allowed:
+                raise ConfigError(
+                    f"account {account.name!r} sends to chat "
+                    f"{account.destination.chat_id}, which is not in "
+                    f"telegram.allowed_chat_ids {sorted(allowed)}. Add it, or fix "
+                    f"the destination."
+                )
+            ci_chat = account.ci_destination.chat_id
+            if ci_chat is not None and ci_chat not in allowed:
+                raise ConfigError(
+                    f"account {account.name!r} routes CI to chat {ci_chat}, which "
+                    f"is not in telegram.allowed_chat_ids {sorted(allowed)}."
+                )
+
     behaviour_raw = raw.get("behaviour") or {}
     behaviour = Behaviour(
         timezone=behaviour_raw.get("timezone", "Asia/Singapore"),

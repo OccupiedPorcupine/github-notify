@@ -262,6 +262,25 @@ class GitHubClient:
             not_modified=False,
         )
 
+    async def get_json(self, url: str) -> dict[str, Any] | None:
+        """GET an absolute API URL from a notification payload.
+
+        Returns None when the resource is gone or unreadable (404/410). §9: a
+        deleted, transferred, or access-revoked subject must degrade to a
+        title-only message, never drop the notification entirely.
+        """
+        try:
+            response = await self._client.get(url)
+        except httpx.HTTPError as exc:
+            raise TransientError(f"enrichment request failed: {exc}") from exc
+
+        if response.status_code in (404, 410):
+            return None
+
+        self._raise_for_status(response)
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+
     async def list_watched_repos(self, *, max_pages: int = 10) -> list[str]:
         """Repos the account watches (GET /user/subscriptions).
 

@@ -269,7 +269,7 @@ class CommandBot:
                 f"error: {escape_html(str(error)[:200])}"
             )
 
-        blocks.append("<i>mode: log-only — nothing is forwarded yet (build step 1)</i>")
+        blocks.append("<i>delivering · outbox and coalescing not built yet</i>")
         return "\n\n".join(blocks)
 
 
